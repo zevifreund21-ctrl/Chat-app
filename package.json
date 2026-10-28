@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "Real-time messaging web app (WhatsApp-style texting) — self-hostable, no build step.",
   "main": "server.js",
+  "engines": {
+    "node": ">=22.5.0"
+  },
   "scripts": {
     "start": "node server.js"
   },
