@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Chat</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<!-- ============ Auth screen ============ -->
+<div id="auth-screen" class="hidden">
+  <div class="auth-card">
+    <div class="auth-logo">💬</div>
+    <h1>Chat</h1>
+    <p class="auth-sub">Message anyone, from anywhere.</p>
+    <div class="auth-tabs">
+      <button id="tab-login" class="auth-tab active">Log in</button>
+      <button id="tab-signup" class="auth-tab">Sign up</button>
+    </div>
+    <form id="auth-form">
+      <input id="auth-username" type="text" placeholder="Username" autocomplete="username" required>
+      <input id="auth-displayname" type="text" placeholder="Display name" class="hidden" maxlength="40">
+      <input id="auth-password" type="password" placeholder="Password" autocomplete="current-password" required>
+      <div id="auth-error" class="error hidden"></div>
+      <button type="submit" id="auth-submit" class="btn-primary">Log in</button>
+    </form>
+  </div>
+</div>
+
+<!-- ============ Main app ============ -->
+<div id="app" class="hidden">
+  <aside id="sidebar">
+    <header class="sidebar-header">
+      <button id="me-avatar" class="avatar" title="My profile"></button>
+      <span id="me-name" class="me-name"></span>
+      <div class="header-actions">
+        <button id="btn-new-group" title="New group">👥</button>
+        <button id="btn-new-chat" title="New chat">✚</button>
+        <button id="btn-logout" title="Log out">↪</button>
+      </div>
+    </header>
+    <div class="search-box">
+      <input id="chat-filter" type="search" placeholder="Search chats">
+    </div>
+    <div id="connection-status" class="conn hidden">Reconnecting…</div>
+    <ul id="chat-list"></ul>
+  </aside>
+
+  <main id="conversation">
+    <div id="empty-state">
+      <div class="empty-emoji">💬</div>
+      <p>Pick a chat, or start a new one.</p>
+    </div>
+
+    <div id="chat-view" class="hidden">
+      <header class="chat-header">
+        <button id="btn-back" class="back-btn">←</button>
+        <button id="chat-avatar" class="avatar"></button>
+        <div class="chat-title-wrap">
+          <div id="chat-title" class="chat-title"></div>
+          <div id="chat-status" class="chat-status"></div>
+        </div>
+        <div class="header-actions">
+          <button id="btn-chat-search" title="Search in chat">🔍</button>
+          <button id="btn-chat-info" title="Chat info">ℹ️</button>
+        </div>
+      </header>
+
+      <div id="chat-search-bar" class="hidden">
+        <input id="chat-search-input" type="search" placeholder="Search messages in this chat">
+        <button id="chat-search-close">✕</button>
+      </div>
+
+      <div id="messages"></div>
+      <div id="typing-indicator" class="typing hidden"></div>
+
+      <div id="reply-bar" class="hidden">
+        <div class="reply-preview"><span id="reply-preview-text"></span></div>
+        <button id="reply-cancel">✕</button>
+      </div>
+      <div id="edit-bar" class="hidden">
+        <span>Editing message</span>
+        <button id="edit-cancel">✕</button>
+      </div>
+
+      <form id="composer">
+        <button type="button" id="btn-emoji" title="Emoji">😊</button>
+        <input id="message-input" type="text" placeholder="Message" autocomplete="off">
+        <button type="button" id="btn-attach" title="Send photo">📎</button>
+        <input id="file-input" type="file" accept="image/*" class="hidden">
+        <button type="button" id="btn-voice" title="Voice note">🎤</button>
+        <button type="submit" id="btn-send" class="btn-primary">➤</button>
+      </form>
+      <div id="emoji-panel" class="hidden"></div>
+      <div id="voice-recording" class="hidden">
+        <span class="rec-dot"></span><span id="rec-time">0:00</span>
+        <button type="button" id="btn-voice-cancel">Cancel</button>
+        <button type="button" id="btn-voice-send" class="btn-primary">Send</button>
+      </div>
+    </div>
+  </main>
+</div>
+
+<!-- ============ Modals ============ -->
+<div id="modal-overlay" class="hidden">
+  <div class="modal">
+    <div class="modal-header">
+      <h2 id="modal-title"></h2>
+      <button id="modal-close">✕</button>
+    </div>
+    <div id="modal-body"></div>
+  </div>
+</div>
+
+<!-- Image viewer -->
+<div id="lightbox" class="hidden">
+  <button id="lightbox-close">✕</button>
+  <img id="lightbox-img" alt="Full-size image">
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>
