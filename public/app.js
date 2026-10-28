@@ -50,12 +50,24 @@ function fmtLastSeen(ts, online) {
 function initials(name) {
   return (name || '?').trim().split(/\s+/).map(w => w[0]).slice(0, 2).join('').toUpperCase();
 }
+// Stable, varied avatar color per person (overridden when they have a photo).
+function avatarColor(name) {
+  let h = 0;
+  for (const ch of String(name || '?')) h = (h * 31 + ch.charCodeAt(0)) % 360;
+  return `hsl(${h} 55% 42%)`;
+}
 function avatarHtml(user, large) {
   const inner = user.avatar ? `<img src="${esc(user.avatar)}" alt="">` : esc(initials(user.display_name));
-  return `<span class="avatar${large ? ' large' : ''}">${inner}</span>`;
+  const style = user.avatar ? '' : ` style="background:${avatarColor(user.display_name)}"`;
+  return `<span class="avatar${large ? ' large' : ''}"${style}>${inner}</span>`;
+}
+function avatarWrap(user, large) {
+  const online = onlineIds.has(user.id);
+  return `<span class="avatar-wrap">${avatarHtml(user, large)}${online ? '<span class="dot online"></span>' : ''}</span>`;
 }
 function setAvatarBtn(btn, user, large) {
   btn.innerHTML = user.avatar ? `<img src="${esc(user.avatar)}" alt="">` : esc(initials(user.display_name));
+  btn.style.background = user.avatar ? '' : avatarColor(user.display_name);
   btn.classList.toggle('large', !!large);
 }
 
@@ -65,6 +77,7 @@ function setAvatarBtn(btn, user, large) {
 let me = null;
 let chats = [];
 let contacts = [];
+let directory = [];
 let activeChatId = null;
 let activeMessages = [];
 let onlineIds = new Set();
@@ -75,6 +88,7 @@ let replyTo = null;
 let editingId = null;
 let typingUsers = new Map(); // chatId -> Map(userId -> {name, timeout})
 let chatSearchMode = false;
+let sidebarTab = 'chats';
 
 // ---------------------------------------------------------------------------
 // Auth
@@ -129,6 +143,7 @@ async function enterApp() {
   $('#me-name').textContent = me.display_name;
   await refreshChats();
   await refreshContacts();
+  await refreshDirectory();
   connectSocket();
   startPollingFallback();
 }
@@ -153,7 +168,7 @@ function renderChatList() {
     li.className = 'chat-item' + (chat.id === activeChatId ? ' active' : '');
     const other = chat.type === 'direct' ? chat.members.find(m => m.id !== me.id) : null;
     li.innerHTML = `
-      ${avatarHtml(other || { display_name: chat.name, avatar: null })}
+      ${avatarWrap(other || { display_name: chat.name, avatar: null, id: -1 })}
       <div class="meta">
         <div class="row1"><span class="name">${esc(chat.name)}</span>
         <span class="time">${chat.last_message ? fmtTime(chat.last_message.created_at) : ''}</span></div>
@@ -178,6 +193,83 @@ async function refreshChats() {
 async function refreshContacts() {
   const { contacts: fresh } = await api.get('/api/contacts');
   contacts = fresh;
+}
+async function refreshDirectory() {
+  try {
+    const { users } = await api.get('/api/directory');
+    directory = users;
+    renderContacts();
+  } catch { /* directory is a nice-to-have; chats still work */ }
+}
+
+// ---------------------------------------------------------------------------
+// Contacts tab: everyone on Chat, contacts first, with call + message buttons
+// ---------------------------------------------------------------------------
+function setSidebarTab(tab) {
+  sidebarTab = tab;
+  $('#tab-chats').classList.toggle('active', tab === 'chats');
+  $('#tab-contacts').classList.toggle('active', tab === 'contacts');
+  $('#chat-list').classList.toggle('hidden', tab !== 'chats');
+  $('#contacts-pane').classList.toggle('hidden', tab !== 'contacts');
+  $('.search-box').classList.toggle('hidden', tab !== 'chats');
+  if (tab === 'contacts') refreshDirectory();
+}
+$('#tab-chats').onclick = () => setSidebarTab('chats');
+$('#tab-contacts').onclick = () => setSidebarTab('contacts');
+$('#contact-filter').addEventListener('input', renderContacts);
+
+function contactRow(u, isContact) {
+  const row = document.createElement('div');
+  row.className = 'contact-row';
+  row.innerHTML = `
+    ${avatarWrap(u)}
+    <div class="who"><div class="cname">${esc(u.display_name)}</div>
+    <div class="uname">${onlineIds.has(u.id) ? 'Online' : (u.last_seen ? fmtLastSeen(u.last_seen, false) : `@${esc(u.username)}`)}</div></div>
+    <div class="contact-actions">
+      <button class="icon-btn" title="Message" data-act="chat">💬</button>
+      <button class="icon-btn" title="Voice call" data-act="voice">📞</button>
+      <button class="icon-btn" title="Video call" data-act="video">📹</button>
+    </div>`;
+  row.querySelector('[data-act="chat"]').onclick = () => startChatWith(u);
+  row.querySelector('[data-act="voice"]').onclick = () => startCall(u, 'audio');
+  row.querySelector('[data-act="video"]').onclick = () => startCall(u, 'video');
+  return row;
+}
+function renderContacts() {
+  const list = $('#contacts-list');
+  if (!list) return;
+  const filter = ($('#contact-filter').value || '').trim().toLowerCase();
+  const match = u => !filter || u.display_name.toLowerCase().includes(filter) || u.username.toLowerCase().includes(filter);
+  const mine = directory.filter(u => u.is_contact && match(u));
+  const everyone = directory.filter(u => !u.is_contact && match(u));
+  list.innerHTML = '';
+  const section = label => {
+    const h = document.createElement('div');
+    h.className = 'section-label';
+    h.textContent = label;
+    list.appendChild(h);
+  };
+  if (mine.length) { section('My contacts'); mine.forEach(u => list.appendChild(contactRow(u, true))); }
+  section(everyone.length ? 'Everyone on Chat' : 'Everyone on Chat');
+  if (!everyone.length && !mine.length) {
+    list.innerHTML += '<p class="empty-note">No one else is on Chat yet. When someone signs up, they will appear here.</p>';
+  } else {
+    everyone.forEach(u => list.appendChild(contactRow(u, false)));
+  }
+  if (!mine.length && !everyone.length && filter) {
+    list.innerHTML = '<p class="empty-note">No one matches that search.</p>';
+  }
+}
+async function startChatWith(u) {
+  try {
+    await api.post('/api/contacts', { contact_id: u.id });
+    const { chat } = await api.post('/api/chats', { type: 'direct', member_ids: [u.id] });
+    await refreshContacts();
+    await refreshDirectory();
+    await refreshChats();
+    setSidebarTab('chats');
+    openChat(chat.id);
+  } catch (err) { alert(err.message); }
 }
 
 // ---------------------------------------------------------------------------
@@ -212,12 +304,25 @@ function updateChatHeader() {
   const other = chat.type === 'direct' ? chat.members.find(m => m.id !== me.id) : null;
   setAvatarBtn($('#chat-avatar'), other || { display_name: chat.name, avatar: null });
   $('#chat-title').textContent = chat.name;
+  const showCalls = chat.type === 'direct' && !!other;
+  $('#btn-call-voice').style.display = showCalls ? '' : 'none';
+  $('#btn-call-video').style.display = showCalls ? '' : 'none';
   if (chat.type === 'direct' && other) {
     $('#chat-status').textContent = fmtLastSeen(other.last_seen, onlineIds.has(other.id));
   } else {
     $('#chat-status').textContent = `${chat.members.length} members`;
   }
 }
+$('#btn-call-voice').onclick = () => {
+  const chat = getChat(activeChatId);
+  const other = chat?.members.find(m => m.id !== me.id);
+  if (other) startCall(other, 'audio');
+};
+$('#btn-call-video').onclick = () => {
+  const chat = getChat(activeChatId);
+  const other = chat?.members.find(m => m.id !== me.id);
+  if (other) startCall(other, 'video');
+};
 
 async function loadMessages(chatId, before) {
   const params = new URLSearchParams({ limit: 50 });
@@ -542,8 +647,12 @@ function connectSocket() {
     } else if (data.type === 'presence') {
       onlineIds = new Set(data.online);
       if (activeChatId) updateChatHeader();
+      renderChatList();
+      renderContacts();
     } else if (data.type === 'typing') {
       showTyping(data);
+    } else if (typeof data.type === 'string' && data.type.startsWith('call:')) {
+      handleCallSignal(data);
     }
   };
 }
@@ -756,6 +865,190 @@ $('#me-avatar').onclick = () => {
     $('#me-name').textContent = me.display_name;
     closeModal();
   };
+};
+
+// ---------------------------------------------------------------------------
+// Voice & video calls (WebRTC peer-to-peer, signaled over the /ws socket)
+// ---------------------------------------------------------------------------
+const CALL_STUN = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+let call = null; // { pc, stream, peer, kind, state, timer, startAt, muted, cameraOff }
+
+function callSend(payload) {
+  if (socketAlive) socket.send(JSON.stringify(payload));
+}
+function setCallStatus(text) { $('#call-status').textContent = text; }
+function showCallOverlay(peer, kind) {
+  $('#call-overlay').classList.remove('hidden');
+  $('#call-name').textContent = peer.display_name;
+  setAvatarBtn($('#call-avatar'), peer, true);
+  $('#call-avatar').style.background = peer.avatar ? '' : avatarColor(peer.display_name);
+  $('#local-video').classList.toggle('hidden', kind !== 'video');
+  $('#remote-video').classList.toggle('hidden', kind !== 'video');
+  $('#btn-call-accept').classList.add('hidden');
+  $('#btn-call-decline').classList.add('hidden');
+  $('#btn-call-end').classList.remove('hidden');
+  $('#call-timer').classList.add('hidden');
+}
+function hideCallOverlay() {
+  $('#call-overlay').classList.add('hidden');
+  $('#remote-video').srcObject = null;
+  $('#remote-audio').srcObject = null;
+  $('#local-video').srcObject = null;
+}
+function startCallTimer() {
+  call.startAt = Date.now();
+  $('#call-timer').classList.remove('hidden');
+  call.timer = setInterval(() => {
+    const s = Math.floor((Date.now() - call.startAt) / 1000);
+    $('#call-timer').textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+  }, 500);
+}
+function cleanupCall() {
+  if (!call) return;
+  clearInterval(call.timer);
+  try { call.pc.close(); } catch { /* noop */ }
+  if (call.stream) call.stream.getTracks().forEach(t => t.stop());
+  call = null;
+  hideCallOverlay();
+  resetCallButtons();
+}
+function resetCallButtons() {
+  $('#btn-call-mute').textContent = '🎤';
+  $('#btn-call-camera').textContent = '📹';
+}
+async function makePeerConnection(peer, kind) {
+  const pc = new RTCPeerConnection(CALL_STUN);
+  pc.onicecandidate = e => {
+    if (e.candidate) callSend({ type: 'call:ice', to: peer.id, candidate: e.candidate });
+  };
+  pc.ontrack = e => {
+    const stream = e.streams[0];
+    if (kind === 'video') $('#remote-video').srcObject = stream;
+    else $('#remote-audio').srcObject = stream;
+  };
+  pc.onconnectionstatechange = () => {
+    if (!call) return;
+    if (pc.connectionState === 'connected') { setCallStatus('Connected'); startCallTimer(); }
+    if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') setCallStatus('Connection lost…');
+  };
+  return pc;
+}
+
+async function startCall(peer, kind) {
+  if (call) { alert('You are already on a call.'); return; }
+  if (!socketAlive) { alert('Calls need a live connection — please try again in a moment.'); return; }
+  if (!onlineIds.has(peer.id)) {
+    if (!confirm(`${peer.display_name} appears offline. Call anyway? They will see it when they come online.`)) return;
+  }
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia(kind === 'video' ? { audio: true, video: true } : { audio: true });
+  } catch {
+    alert('Camera/microphone is not available. Check browser permissions and try again.');
+    return;
+  }
+  call = { peer, kind, state: 'calling', stream, pc: null, timer: null, muted: false, cameraOff: false };
+  showCallOverlay(peer, kind);
+  setCallStatus(kind === 'video' ? 'Video calling…' : 'Calling…');
+  $('#local-video').srcObject = stream;
+  const pc = await makePeerConnection(peer, kind);
+  call.pc = pc;
+  stream.getTracks().forEach(t => pc.addTrack(t, stream));
+  try {
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    callSend({ type: 'call:offer', to: peer.id, kind, offer });
+  } catch {
+    alert('Could not start the call.');
+    endCall();
+  }
+}
+
+async function handleCallSignal(data) {
+  if (data.type === 'call:offer') {
+    if (call) { callSend({ type: 'call:busy', to: data.from }); return; }
+    const peer = { id: data.from, display_name: data.from_name || 'Someone', avatar: null };
+    const known = directory.find(u => u.id === data.from) || contacts.find(u => u.id === data.from);
+    if (known) { peer.display_name = known.display_name; peer.avatar = known.avatar; }
+    call = { peer, kind: data.kind || 'audio', state: 'incoming', stream: null, pc: null, timer: null, offer: data.offer, muted: false, cameraOff: false };
+    showCallOverlay(peer, call.kind);
+    setCallStatus(data.kind === 'video' ? 'Incoming video call…' : 'Incoming voice call…');
+    $('#btn-call-accept').classList.remove('hidden');
+    $('#btn-call-decline').classList.remove('hidden');
+    $('#btn-call-end').classList.add('hidden');
+    if (navigator.vibrate) navigator.vibrate([400, 200, 400]);
+    return;
+  }
+  if (!call) return;
+  if (data.type === 'call:answer' && call.pc) {
+    await call.pc.setRemoteDescription(new RTCSessionDescription(data.answer)).catch(() => {});
+    setCallStatus('Connecting…');
+  } else if (data.type === 'call:ice' && call.pc && data.candidate) {
+    await call.pc.addIceCandidate(new RTCIceCandidate(data.candidate)).catch(() => {});
+  } else if (data.type === 'call:decline') {
+    setCallStatus('Declined');
+    setTimeout(cleanupCall, 1200);
+  } else if (data.type === 'call:busy') {
+    setCallStatus('Busy — on another call');
+    setTimeout(cleanupCall, 1500);
+  } else if (data.type === 'call:end') {
+    setCallStatus('Call ended');
+    setTimeout(cleanupCall, 800);
+  }
+}
+
+async function acceptCall() {
+  if (!call || call.state !== 'incoming') return;
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia(call.kind === 'video' ? { audio: true, video: true } : { audio: true });
+  } catch {
+    alert('Camera/microphone is not available. Check browser permissions and try again.');
+    declineCall();
+    return;
+  }
+  call.stream = stream;
+  call.state = 'active';
+  $('#local-video').srcObject = stream;
+  $('#btn-call-accept').classList.add('hidden');
+  $('#btn-call-decline').classList.add('hidden');
+  $('#btn-call-end').classList.remove('hidden');
+  setCallStatus('Connecting…');
+  const pc = await makePeerConnection(call.peer, call.kind);
+  call.pc = pc;
+  stream.getTracks().forEach(t => pc.addTrack(t, stream));
+  await pc.setRemoteDescription(new RTCSessionDescription(call.offer)).catch(() => {});
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+  callSend({ type: 'call:answer', to: call.peer.id, answer });
+}
+function declineCall() {
+  if (!call) return;
+  const peerId = call.peer.id;
+  const wasIncoming = call.state === 'incoming';
+  cleanupCall();
+  if (wasIncoming) callSend({ type: 'call:decline', to: peerId });
+}
+function endCall() {
+  if (!call) return;
+  const peerId = call.peer.id;
+  cleanupCall();
+  callSend({ type: 'call:end', to: peerId });
+}
+$('#btn-call-accept').onclick = acceptCall;
+$('#btn-call-decline').onclick = declineCall;
+$('#btn-call-end').onclick = endCall;
+$('#btn-call-mute').onclick = () => {
+  if (!call || !call.stream) return;
+  call.muted = !call.muted;
+  call.stream.getAudioTracks().forEach(t => { t.enabled = !call.muted; });
+  $('#btn-call-mute').textContent = call.muted ? '🔇' : '🎤';
+};
+$('#btn-call-camera').onclick = () => {
+  if (!call || !call.stream) return;
+  call.cameraOff = !call.cameraOff;
+  call.stream.getVideoTracks().forEach(t => { t.enabled = !call.cameraOff; });
+  $('#btn-call-camera').textContent = call.cameraOff ? '🚫' : '📹';
 };
 
 boot();

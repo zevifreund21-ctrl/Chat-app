@@ -41,10 +41,20 @@
       </div>
     </header>
     <div class="search-box">
-      <input id="chat-filter" type="search" placeholder="Search chats">
+      <input id="chat-filter" type="search" placeholder="Search">
+    </div>
+    <div class="sidebar-tabs">
+      <button id="tab-chats" class="sidebar-tab active">Chats</button>
+      <button id="tab-contacts" class="sidebar-tab">Contacts</button>
     </div>
     <div id="connection-status" class="conn hidden">Reconnecting…</div>
     <ul id="chat-list"></ul>
+    <div id="contacts-pane" class="hidden">
+      <div class="contacts-search">
+        <input id="contact-filter" type="search" placeholder="Search people">
+      </div>
+      <div id="contacts-list"></div>
+    </div>
   </aside>
 
   <main id="conversation">
@@ -62,6 +72,8 @@
           <div id="chat-status" class="chat-status"></div>
         </div>
         <div class="header-actions">
+          <button id="btn-call-voice" title="Voice call">📞</button>
+          <button id="btn-call-video" title="Video call">📹</button>
           <button id="btn-chat-search" title="Search in chat">🔍</button>
           <button id="btn-chat-info" title="Chat info">ℹ️</button>
         </div>
@@ -117,6 +129,28 @@
 <div id="lightbox" class="hidden">
   <button id="lightbox-close">✕</button>
   <img id="lightbox-img" alt="Full-size image">
+</div>
+
+<!-- Call overlay -->
+<div id="call-overlay" class="hidden">
+  <div class="call-video-wrap">
+    <video id="remote-video" autoplay playsinline></video>
+    <video id="local-video" autoplay playsinline muted></video>
+    <audio id="remote-audio" autoplay playsinline></audio>
+  </div>
+  <div class="call-info">
+    <span id="call-avatar" class="avatar large"></span>
+    <div id="call-name" class="call-name"></div>
+    <div id="call-status" class="call-status"></div>
+    <div id="call-timer" class="call-timer hidden">0:00</div>
+  </div>
+  <div class="call-controls">
+    <button id="btn-call-mute" class="call-ctl" title="Mute">🎤</button>
+    <button id="btn-call-camera" class="call-ctl" title="Camera on/off">📹</button>
+    <button id="btn-call-decline" class="call-ctl decline hidden" title="Decline">✕</button>
+    <button id="btn-call-accept" class="call-ctl accept hidden" title="Accept">📞</button>
+    <button id="btn-call-end" class="call-ctl end" title="End call">📞</button>
+  </div>
 </div>
 
 <script src="/app.js"></script>
