@@ -37,6 +37,7 @@
       <div class="header-actions">
         <button id="btn-new-group" title="New group">👥</button>
         <button id="btn-new-chat" title="New chat">✚</button>
+        <button id="btn-settings" title="Settings">⚙️</button>
         <button id="btn-logout" title="Log out">↪</button>
       </div>
     </header>
@@ -48,6 +49,9 @@
       <button id="tab-contacts" class="sidebar-tab">Contacts</button>
     </div>
     <div id="connection-status" class="conn hidden">Reconnecting…</div>
+    <div id="archived-row" class="archived-row hidden">
+      <span class="arch-icon">📦</span><span>Archived</span><span id="archived-count" class="arch-count"></span>
+    </div>
     <ul id="chat-list"></ul>
     <div id="contacts-pane" class="hidden">
       <div class="contacts-search">
@@ -76,6 +80,7 @@
           <button id="btn-call-video" title="Video call">📹</button>
           <button id="btn-chat-search" title="Search in chat">🔍</button>
           <button id="btn-chat-info" title="Chat info">ℹ️</button>
+          <button id="btn-chat-menu" title="More options">⋮</button>
         </div>
       </header>
 
@@ -130,6 +135,9 @@
   <button id="lightbox-close">✕</button>
   <img id="lightbox-img" alt="Full-size image">
 </div>
+
+<!-- Toast -->
+<div id="toast" role="status"></div>
 
 <!-- Call overlay -->
 <div id="call-overlay" class="hidden">

@@ -31,6 +31,9 @@ CREATE TABLE IF NOT EXISTS users (
   display_name TEXT NOT NULL,
   password_hash TEXT NOT NULL,
   avatar TEXT,
+  about TEXT NOT NULL DEFAULT '',
+  last_seen_visibility TEXT NOT NULL DEFAULT 'everyone',
+  read_receipts INTEGER NOT NULL DEFAULT 1,
   last_seen INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL
 );
@@ -68,6 +71,7 @@ CREATE TABLE IF NOT EXISTS messages (
   reply_to INTEGER REFERENCES messages(id) ON DELETE SET NULL,
   edited_at INTEGER,
   deleted INTEGER NOT NULL DEFAULT 0,
+  forwarded INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS message_status (
@@ -77,7 +81,44 @@ CREATE TABLE IF NOT EXISTS message_status (
   read INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (message_id, user_id)
 );
+CREATE TABLE IF NOT EXISTS reactions (
+  message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  emoji TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (message_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS stars (
+  message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (message_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS chat_prefs (
+  chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  pinned INTEGER NOT NULL DEFAULT 0,
+  archived INTEGER NOT NULL DEFAULT 0,
+  muted INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (chat_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS blocks (
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  blocked_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (user_id, blocked_id)
+);
 `);
+
+// Migrations for databases created before these columns/tables existed.
+function ensureColumn(table, column, ddl) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all().map(c => c.name);
+  if (!cols.includes(column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
+}
+ensureColumn('users', 'about', `TEXT NOT NULL DEFAULT ''`);
+ensureColumn('users', 'last_seen_visibility', `TEXT NOT NULL DEFAULT 'everyone'`);
+ensureColumn('users', 'read_receipts', `INTEGER NOT NULL DEFAULT 1`);
+ensureColumn('messages', 'forwarded', `INTEGER NOT NULL DEFAULT 0`);
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -98,9 +139,34 @@ function verifyPassword(password, stored) {
 function newToken() { return crypto.randomBytes(32).toString('hex'); }
 
 // Public user shape — NEVER includes password_hash.
-function publicUser(row) {
+// When viewerId is given, last_seen/about respect the profile owner's
+// privacy settings and blocks; when viewerId === row.id, the owner's own
+// privacy settings are included too.
+function isBlockedEither(a, b) {
+  return !!db.prepare(
+    'SELECT 1 FROM blocks WHERE (user_id = ? AND blocked_id = ?) OR (user_id = ? AND blocked_id = ?)'
+  ).get(a, b, b, a);
+}
+function publicUser(row, viewerId) {
   if (!row) return null;
-  return { id: row.id, username: row.username, display_name: row.display_name, avatar: row.avatar || null, last_seen: row.last_seen };
+  const out = {
+    id: row.id, username: row.username, display_name: row.display_name,
+    avatar: row.avatar || null, about: row.about || '', last_seen: row.last_seen,
+  };
+  if (viewerId && viewerId !== row.id) {
+    if (isBlockedEither(viewerId, row.id)) { out.about = ''; out.last_seen = 0; return out; }
+    const vis = row.last_seen_visibility || 'everyone';
+    if (vis === 'nobody') out.last_seen = 0;
+    else if (vis === 'contacts') {
+      const isContact = !!db.prepare('SELECT 1 FROM contacts WHERE user_id = ? AND contact_id = ?').get(row.id, viewerId);
+      if (!isContact) out.last_seen = 0;
+    }
+  }
+  if (viewerId === row.id) {
+    out.last_seen_visibility = row.last_seen_visibility || 'everyone';
+    out.read_receipts = row.read_receipts !== 0;
+  }
+  return out;
 }
 function parseCookies(req) {
   const out = {};
@@ -159,6 +225,11 @@ function serializeMessage(row, meId) {
       ticks = allRead ? 'read' : allDelivered ? 'delivered' : 'sent';
     }
   }
+  const reactions = db.prepare(
+    `SELECT r.emoji, r.user_id, u.display_name FROM reactions r
+     JOIN users u ON u.id = r.user_id WHERE r.message_id = ? ORDER BY r.created_at`
+  ).all(row.id).map(r => ({ emoji: r.emoji, user_id: r.user_id, display_name: r.display_name }));
+  const starred = !!db.prepare('SELECT 1 FROM stars WHERE message_id = ? AND user_id = ?').get(row.id, meId);
   return {
     id: row.id,
     chat_id: row.chat_id,
@@ -169,6 +240,9 @@ function serializeMessage(row, meId) {
     reply_to: reply,
     edited: !!row.edited_at,
     deleted: !!row.deleted,
+    forwarded: !!row.forwarded,
+    reactions,
+    starred,
     created_at: row.created_at,
     ticks,
   };
@@ -215,8 +289,9 @@ app.post('/api/signup', (req, res) => {
       .run(username, display_name.trim(), hashPassword(password), now());
     const token = newToken();
     db.prepare('INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, ?)').run(token, Number(result.lastInsertRowid), now());
-    res.cookie('session', token, { httpOnly: true, sameSite: 'lax', path: '/', maxAge: 30 * 24 * 3600 * 1000 });
-    res.json({ user: publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(Number(result.lastInsertRowid))) });
+    res.cookie('session', token, { httpOnly: true, sameSite: 'lax', path: '/', maxAge: 365 * 24 * 3600 * 1000 });
+    const newUser = db.prepare('SELECT * FROM users WHERE id = ?').get(Number(result.lastInsertRowid));
+    res.json({ user: publicUser(newUser, newUser.id) });
   } catch (e) {
     if (String(e.message).includes('UNIQUE')) return res.status(409).json({ error: 'That username is already taken.' });
     throw e;
@@ -231,8 +306,8 @@ app.post('/api/login', (req, res) => {
   }
   const token = newToken();
   db.prepare('INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, ?)').run(token, user.id, now());
-  res.cookie('session', token, { httpOnly: true, sameSite: 'lax', path: '/', maxAge: 30 * 24 * 3600 * 1000 });
-  res.json({ user: publicUser(user) });
+  res.cookie('session', token, { httpOnly: true, sameSite: 'lax', path: '/', maxAge: 365 * 24 * 3600 * 1000 });
+  res.json({ user: publicUser(user, user.id) });
 });
 
 app.post('/api/logout', requireAuth, (req, res) => {
@@ -241,21 +316,79 @@ app.post('/api/logout', requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
-app.get('/api/me', requireAuth, (req, res) => res.json({ user: publicUser(req.user) }));
+app.get('/api/me', requireAuth, (req, res) => res.json({ user: publicUser(req.user, req.user.id) }));
 
 app.put('/api/me', requireAuth, (req, res) => {
-  const { display_name } = req.body || {};
-  if (!display_name || display_name.trim().length < 1 || display_name.length > 40) {
-    return res.status(400).json({ error: 'Display name is required.' });
+  const { display_name, about, last_seen_visibility, read_receipts } = req.body || {};
+  const updates = [];
+  const params = [];
+  if (display_name !== undefined) {
+    if (!display_name || display_name.trim().length < 1 || display_name.length > 40) {
+      return res.status(400).json({ error: 'Display name is required.' });
+    }
+    updates.push('display_name = ?'); params.push(display_name.trim());
   }
-  db.prepare('UPDATE users SET display_name = ? WHERE id = ?').run(display_name.trim(), req.user.id);
-  res.json({ user: publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id)) });
+  if (about !== undefined) {
+    if (typeof about !== 'string' || about.length > 140) return res.status(400).json({ error: 'About must be 140 characters or less.' });
+    updates.push('about = ?'); params.push(about.trim());
+  }
+  if (last_seen_visibility !== undefined) {
+    if (!['everyone', 'contacts', 'nobody'].includes(last_seen_visibility)) {
+      return res.status(400).json({ error: 'Invalid last-seen setting.' });
+    }
+    updates.push('last_seen_visibility = ?'); params.push(last_seen_visibility);
+  }
+  if (read_receipts !== undefined) {
+    updates.push('read_receipts = ?'); params.push(read_receipts ? 1 : 0);
+  }
+  if (!updates.length) return res.status(400).json({ error: 'Nothing to update.' });
+  db.prepare(`UPDATE users SET ${updates.join(', ')} WHERE id = ?`).run(...params, req.user.id);
+  const row = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+  res.json({ user: publicUser(row, row.id) });
+});
+
+app.post('/api/change-password', requireAuth, (req, res) => {
+  const { current_password, new_password } = req.body || {};
+  if (!verifyPassword(current_password || '', req.user.password_hash)) {
+    return res.status(401).json({ error: 'Current password is wrong.' });
+  }
+  if (!new_password || new_password.length < 4) {
+    return res.status(400).json({ error: 'New password must be at least 4 characters.' });
+  }
+  db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(new_password), req.user.id);
+  // Log out other sessions; this device stays logged in.
+  db.prepare('DELETE FROM sessions WHERE user_id = ? AND token != ?').run(req.user.id, parseCookies(req).session);
+  res.json({ ok: true });
 });
 
 app.post('/api/me/avatar', requireAuth, upload.single('avatar'), (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No image uploaded.' });
   db.prepare('UPDATE users SET avatar = ? WHERE id = ?').run(`/uploads/${req.file.filename}`, req.user.id);
-  res.json({ user: publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id)) });
+  const row = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+  res.json({ user: publicUser(row, row.id) });
+});
+
+// ---------------------------------------------------------------------------
+// Blocks API
+// ---------------------------------------------------------------------------
+app.get('/api/blocks', requireAuth, (req, res) => {
+  const rows = db.prepare(
+    `SELECT u.* FROM blocks b JOIN users u ON u.id = b.blocked_id WHERE b.user_id = ? ORDER BY u.display_name`
+  ).all(req.user.id);
+  res.json({ blocked: rows.map(r => publicUser(r, req.user.id)) });
+});
+
+app.post('/api/blocks', requireAuth, (req, res) => {
+  const blockedId = Number(req.body.user_id);
+  if (!blockedId || blockedId === req.user.id) return res.status(400).json({ error: 'Invalid user.' });
+  if (!db.prepare('SELECT id FROM users WHERE id = ?').get(blockedId)) return res.status(404).json({ error: 'User not found.' });
+  db.prepare('INSERT OR IGNORE INTO blocks (user_id, blocked_id, created_at) VALUES (?, ?, ?)').run(req.user.id, blockedId, now());
+  res.json({ ok: true });
+});
+
+app.delete('/api/blocks/:id', requireAuth, (req, res) => {
+  db.prepare('DELETE FROM blocks WHERE user_id = ? AND blocked_id = ?').run(req.user.id, Number(req.params.id));
+  res.json({ ok: true });
 });
 
 // ---------------------------------------------------------------------------
@@ -265,30 +398,35 @@ app.get('/api/users', requireAuth, (req, res) => {
   const q = String(req.query.q || '').trim();
   if (q.length < 1) return res.json({ users: [] });
   const rows = db.prepare(
-    `SELECT id, username, display_name, avatar, last_seen FROM users
-     WHERE id != ? AND (username LIKE ? OR display_name LIKE ?) LIMIT 20`
-  ).all(req.user.id, `%${q}%`, `%${q}%`);
-  res.json({ users: rows.map(publicUser) });
+    `SELECT u.id, u.username, u.display_name, u.avatar, u.about, u.last_seen_visibility, u.last_seen FROM users u
+     WHERE u.id != ? AND (u.username LIKE ? OR u.display_name LIKE ?)
+       AND u.id NOT IN (SELECT blocked_id FROM blocks WHERE user_id = ?)
+       AND u.id NOT IN (SELECT user_id FROM blocks WHERE blocked_id = ?) LIMIT 20`
+  ).all(req.user.id, `%${q}%`, `%${q}%`, req.user.id, req.user.id);
+  res.json({ users: rows.map(r => publicUser(r, req.user.id)) });
 });
 
 // Everyone on the app, with a flag for people already in my contacts, so
 // contacts show up without having to search for them first.
 app.get('/api/directory', requireAuth, (req, res) => {
   const rows = db.prepare(
-    `SELECT u.id, u.username, u.display_name, u.avatar, u.last_seen,
+    `SELECT u.id, u.username, u.display_name, u.avatar, u.about, u.last_seen_visibility, u.last_seen,
        CASE WHEN c.contact_id IS NOT NULL THEN 1 ELSE 0 END AS is_contact
      FROM users u LEFT JOIN contacts c ON c.contact_id = u.id AND c.user_id = ?
-     WHERE u.id != ? ORDER BY u.display_name COLLATE NOCASE`
-  ).all(req.user.id, req.user.id);
-  res.json({ users: rows.map(r => ({ ...publicUser(r), is_contact: !!r.is_contact })) });
+     WHERE u.id != ?
+       AND u.id NOT IN (SELECT blocked_id FROM blocks WHERE user_id = ?)
+       AND u.id NOT IN (SELECT user_id FROM blocks WHERE blocked_id = ?)
+     ORDER BY u.display_name COLLATE NOCASE`
+  ).all(req.user.id, req.user.id, req.user.id, req.user.id);
+  res.json({ users: rows.map(r => ({ ...publicUser(r, req.user.id), is_contact: !!r.is_contact })) });
 });
 
 app.get('/api/contacts', requireAuth, (req, res) => {
   const rows = db.prepare(
-    `SELECT u.id, u.username, u.display_name, u.avatar, u.last_seen FROM contacts c
+    `SELECT u.id, u.username, u.display_name, u.avatar, u.about, u.last_seen_visibility, u.last_seen FROM contacts c
      JOIN users u ON u.id = c.contact_id WHERE c.user_id = ? ORDER BY u.display_name`
   ).all(req.user.id);
-  res.json({ contacts: rows.map(publicUser) });
+  res.json({ contacts: rows.map(r => publicUser(r, req.user.id)) });
 });
 
 app.post('/api/contacts', requireAuth, (req, res) => {
@@ -310,7 +448,7 @@ app.delete('/api/contacts/:id', requireAuth, (req, res) => {
 // ---------------------------------------------------------------------------
 function chatSummary(chat, meId) {
   const members = db.prepare(
-    `SELECT u.id, u.username, u.display_name, u.avatar, u.last_seen FROM chat_members cm
+    `SELECT u.id, u.username, u.display_name, u.avatar, u.about, u.last_seen_visibility, u.last_seen FROM chat_members cm
      JOIN users u ON u.id = cm.user_id WHERE cm.chat_id = ?`
   ).all(chat.id);
   const last = db.prepare('SELECT * FROM messages WHERE chat_id = ? ORDER BY id DESC LIMIT 1').get(chat.id);
@@ -319,13 +457,16 @@ function chatSummary(chat, meId) {
      ON s.message_id = m.id AND s.user_id = ?
      WHERE m.chat_id = ? AND m.sender_id != ? AND (s.read IS NULL OR s.read = 0) AND m.deleted = 0`
   ).get(meId, chat.id, meId).n;
+  const prefs = db.prepare('SELECT pinned, archived, muted FROM chat_prefs WHERE chat_id = ? AND user_id = ?').get(chat.id, meId)
+    || { pinned: 0, archived: 0, muted: 0 };
   return {
     id: chat.id,
     type: chat.type,
     name: chat.type === 'group' ? (chat.name || 'Group') : (members.find(m => m.id !== meId)?.display_name || 'Chat'),
-    members: members.map(publicUser),
+    members: members.map(m => publicUser(m, meId)),
     last_message: last ? serializeMessage(last, meId) : null,
     unread,
+    prefs: { pinned: !!prefs.pinned, archived: !!prefs.archived, muted: !!prefs.muted },
   };
 }
 
@@ -335,8 +476,60 @@ app.get('/api/chats', requireAuth, (req, res) => {
      WHERE cm.user_id = ? ORDER BY c.id DESC`
   ).all(req.user.id);
   const summaries = chats.map(c => chatSummary(c, req.user.id));
-  summaries.sort((a, b) => (b.last_message?.created_at || 0) - (a.last_message?.created_at || 0));
+  summaries.sort((a, b) =>
+    ((b.prefs.pinned ? 1 : 0) - (a.prefs.pinned ? 1 : 0)) ||
+    ((b.last_message?.created_at || 0) - (a.last_message?.created_at || 0)));
   res.json({ chats: summaries });
+});
+
+app.get('/api/chats/:id', requireAuth, (req, res) => {
+  const chatId = Number(req.params.id);
+  if (!isMember(chatId, req.user.id)) return res.status(403).json({ error: 'Not a member of this chat.' });
+  const chat = db.prepare('SELECT * FROM chats WHERE id = ?').get(chatId);
+  if (!chat) return res.status(404).json({ error: 'Chat not found.' });
+  res.json({ chat: chatSummary(chat, req.user.id) });
+});
+
+app.put('/api/chats/:id/prefs', requireAuth, (req, res) => {
+  const chatId = Number(req.params.id);
+  if (!isMember(chatId, req.user.id)) return res.status(403).json({ error: 'Not a member of this chat.' });
+  const { pinned, archived, muted } = req.body || {};
+  const cur = db.prepare('SELECT pinned, archived, muted FROM chat_prefs WHERE chat_id = ? AND user_id = ?').get(chatId, req.user.id)
+    || { pinned: 0, archived: 0, muted: 0 };
+  const next = {
+    pinned: pinned === undefined ? cur.pinned : (pinned ? 1 : 0),
+    archived: archived === undefined ? cur.archived : (archived ? 1 : 0),
+    muted: muted === undefined ? cur.muted : (muted ? 1 : 0),
+  };
+  db.prepare(
+    `INSERT INTO chat_prefs (chat_id, user_id, pinned, archived, muted) VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(chat_id, user_id) DO UPDATE SET pinned = ?, archived = ?, muted = ?`
+  ).run(chatId, req.user.id, next.pinned, next.archived, next.muted, next.pinned, next.archived, next.muted);
+  res.json({ prefs: { pinned: !!next.pinned, archived: !!next.archived, muted: !!next.muted } });
+});
+
+app.put('/api/chats/:id', requireAuth, (req, res) => {
+  const chatId = Number(req.params.id);
+  if (!isMember(chatId, req.user.id)) return res.status(403).json({ error: 'Not a member of this chat.' });
+  const chat = db.prepare('SELECT * FROM chats WHERE id = ?').get(chatId);
+  if (!chat || chat.type !== 'group') return res.status(400).json({ error: 'Only group chats can be renamed.' });
+  const name = String(req.body.name || '').trim().slice(0, 40);
+  if (!name) return res.status(400).json({ error: 'Group needs a name.' });
+  db.prepare('UPDATE chats SET name = ? WHERE id = ?').run(name, chatId);
+  res.json({ chat: chatSummary(db.prepare('SELECT * FROM chats WHERE id = ?').get(chatId), req.user.id) });
+});
+
+app.delete('/api/chats/:id', requireAuth, (req, res) => {
+  const chatId = Number(req.params.id);
+  if (!isMember(chatId, req.user.id)) return res.status(403).json({ error: 'Not a member of this chat.' });
+  db.prepare('DELETE FROM chat_members WHERE chat_id = ? AND user_id = ?').run(chatId, req.user.id);
+  db.prepare('DELETE FROM chat_prefs WHERE chat_id = ? AND user_id = ?').run(chatId, req.user.id);
+  // Remove the chat row entirely once nobody is left in it.
+  const left = db.prepare('SELECT COUNT(*) AS n FROM chat_members WHERE chat_id = ?').get(chatId).n;
+  if (!left) {
+    db.prepare('DELETE FROM chats WHERE id = ?').run(chatId);
+  }
+  res.json({ ok: true });
 });
 
 app.post('/api/chats', requireAuth, (req, res) => {
@@ -346,6 +539,7 @@ app.post('/api/chats', requireAuth, (req, res) => {
     if (memberIds.length !== 1) return res.status(400).json({ error: 'Direct chat needs exactly one other person.' });
     const otherId = memberIds[0];
     if (!db.prepare('SELECT id FROM users WHERE id = ?').get(otherId)) return res.status(404).json({ error: 'User not found.' });
+    if (isBlockedEither(req.user.id, otherId)) return res.status(403).json({ error: 'You cannot message this person.' });
     // Reuse an existing direct chat between the two users.
     const existing = db.prepare(
       `SELECT c.id FROM chats c
@@ -429,6 +623,14 @@ app.post('/api/chats/:id/messages', requireAuth, (req, res, next) => {
 }, (req, res) => {
   const chatId = Number(req.params.id);
   if (!isMember(chatId, req.user.id)) return res.status(403).json({ error: 'Not a member of this chat.' });
+  const chatRow = db.prepare('SELECT * FROM chats WHERE id = ?').get(chatId);
+  if (chatRow && chatRow.type === 'direct') {
+    const otherId = chatMembers(chatId).find(id => id !== req.user.id);
+    if (otherId && isBlockedEither(req.user.id, otherId)) {
+      if (req.file) { try { fs.unlinkSync(req.file.path); } catch { /* ignore */ } }
+      return res.status(403).json({ error: 'You cannot message this person.' });
+    }
+  }
   const body = String(req.body.body || '').trim().slice(0, 4000);
   const replyTo = req.body.reply_to ? Number(req.body.reply_to) : null;
   let type = 'text';
@@ -480,7 +682,12 @@ app.delete('/api/messages/:id', requireAuth, (req, res) => {
   const msg = db.prepare('SELECT * FROM messages WHERE id = ?').get(id);
   if (!msg) return res.status(404).json({ error: 'Message not found.' });
   if (msg.sender_id !== req.user.id) return res.status(403).json({ error: 'You can only delete your own messages.' });
-  if (msg.file_path) { try { fs.unlinkSync(msg.file_path); } catch { /* already gone */ } }
+  if (msg.file_path) {
+    // Only remove the file when no other live message still uses it
+    // (forwarded copies share the same file).
+    const shared = db.prepare('SELECT COUNT(*) AS n FROM messages WHERE file_path = ? AND id != ? AND deleted = 0').get(msg.file_path, id).n;
+    if (!shared) { try { fs.unlinkSync(msg.file_path); } catch { /* already gone */ } }
+  }
   db.prepare('UPDATE messages SET deleted = 1, body = NULL, file_path = NULL WHERE id = ?').run(id);
   broadcastToChat(msg.chat_id, { type: 'message-deleted', message_id: id, chat_id: msg.chat_id });
   res.json({ ok: true });
@@ -489,12 +696,121 @@ app.delete('/api/messages/:id', requireAuth, (req, res) => {
 app.post('/api/chats/:id/read', requireAuth, (req, res) => {
   const chatId = Number(req.params.id);
   if (!isMember(chatId, req.user.id)) return res.status(403).json({ error: 'Not a member of this chat.' });
+  // If I turned read receipts off, senders only ever see "delivered" for my reads.
+  const readVal = req.user.read_receipts !== 0 ? 1 : 0;
   db.prepare(
-    `UPDATE message_status SET delivered = 1, read = 1 WHERE user_id = ? AND message_id IN
+    `UPDATE message_status SET delivered = 1, read = ? WHERE user_id = ? AND message_id IN
      (SELECT id FROM messages WHERE chat_id = ? AND sender_id != ?)`
-  ).run(req.user.id, chatId, req.user.id);
+  ).run(readVal, req.user.id, chatId, req.user.id);
   broadcastToChat(chatId, { type: 'read', chat_id: chatId, user_id: req.user.id }, req.user.id);
   res.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// Reactions, stars, forward, message info
+// ---------------------------------------------------------------------------
+const REACTION_EMOJIS = ['❤️', '😂', '😮', '😢', '🙏', '👍', '👎', '🔥'];
+
+app.post('/api/messages/:id/reactions', requireAuth, (req, res) => {
+  const id = Number(req.params.id);
+  const emoji = String(req.body.emoji || '');
+  const msg = db.prepare('SELECT * FROM messages WHERE id = ?').get(id);
+  if (!msg) return res.status(404).json({ error: 'Message not found.' });
+  if (!isMember(msg.chat_id, req.user.id)) return res.status(403).json({ error: 'Not a member of this chat.' });
+  if (!REACTION_EMOJIS.includes(emoji)) return res.status(400).json({ error: 'Invalid reaction.' });
+  db.prepare(
+    `INSERT INTO reactions (message_id, user_id, emoji, created_at) VALUES (?, ?, ?, ?)
+     ON CONFLICT(message_id, user_id) DO UPDATE SET emoji = ?`
+  ).run(id, req.user.id, emoji, now(), emoji);
+  const updated = serializeMessage(db.prepare('SELECT * FROM messages WHERE id = ?').get(id), req.user.id);
+  broadcastToChat(msg.chat_id, { type: 'message-updated', message: updated });
+  res.json({ message: updated });
+});
+
+app.delete('/api/messages/:id/reactions', requireAuth, (req, res) => {
+  const id = Number(req.params.id);
+  const msg = db.prepare('SELECT * FROM messages WHERE id = ?').get(id);
+  if (!msg) return res.status(404).json({ error: 'Message not found.' });
+  if (!isMember(msg.chat_id, req.user.id)) return res.status(403).json({ error: 'Not a member of this chat.' });
+  db.prepare('DELETE FROM reactions WHERE message_id = ? AND user_id = ?').run(id, req.user.id);
+  const updated = serializeMessage(db.prepare('SELECT * FROM messages WHERE id = ?').get(id), req.user.id);
+  broadcastToChat(msg.chat_id, { type: 'message-updated', message: updated });
+  res.json({ message: updated });
+});
+
+app.post('/api/messages/:id/star', requireAuth, (req, res) => {
+  const id = Number(req.params.id);
+  const msg = db.prepare('SELECT * FROM messages WHERE id = ?').get(id);
+  if (!msg) return res.status(404).json({ error: 'Message not found.' });
+  if (!isMember(msg.chat_id, req.user.id)) return res.status(403).json({ error: 'Not a member of this chat.' });
+  db.prepare('INSERT OR IGNORE INTO stars (message_id, user_id, created_at) VALUES (?, ?, ?)').run(id, req.user.id, now());
+  res.json({ ok: true });
+});
+
+app.delete('/api/messages/:id/star', requireAuth, (req, res) => {
+  const id = Number(req.params.id);
+  db.prepare('DELETE FROM stars WHERE message_id = ? AND user_id = ?').run(id, req.user.id);
+  res.json({ ok: true });
+});
+
+app.get('/api/starred', requireAuth, (req, res) => {
+  const rows = db.prepare(
+    `SELECT m.* FROM stars s JOIN messages m ON m.id = s.message_id
+     JOIN chat_members cm ON cm.chat_id = m.chat_id AND cm.user_id = ?
+     WHERE s.user_id = ? AND m.deleted = 0 ORDER BY s.created_at DESC LIMIT 100`
+  ).all(req.user.id, req.user.id);
+  const messages = rows.map(r => {
+    const chat = db.prepare('SELECT * FROM chats WHERE id = ?').get(r.chat_id);
+    return { ...serializeMessage(r, req.user.id), chat_name: chat ? chatTitle(chat, req.user.id) : 'Chat' };
+  });
+  res.json({ messages });
+});
+
+app.post('/api/messages/:id/forward', requireAuth, (req, res) => {
+  const id = Number(req.params.id);
+  const msg = db.prepare('SELECT * FROM messages WHERE id = ?').get(id);
+  if (!msg) return res.status(404).json({ error: 'Message not found.' });
+  if (msg.deleted) return res.status(400).json({ error: 'Message was deleted.' });
+  if (!isMember(msg.chat_id, req.user.id)) return res.status(403).json({ error: 'Not a member of this chat.' });
+  const chatIds = [...new Set((req.body.chat_ids || []).map(Number).filter(Boolean))];
+  if (!chatIds.length) return res.status(400).json({ error: 'Choose at least one chat.' });
+  const sent = [];
+  for (const chatId of chatIds) {
+    if (!isMember(chatId, req.user.id)) continue;
+    const target = db.prepare('SELECT * FROM chats WHERE id = ?').get(chatId);
+    if (target && target.type === 'direct') {
+      const otherId = chatMembers(chatId).find(x => x !== req.user.id);
+      if (otherId && isBlockedEither(req.user.id, otherId)) continue;
+    }
+    const r = db.prepare(
+      'INSERT INTO messages (chat_id, sender_id, type, body, file_path, reply_to, forwarded, created_at) VALUES (?, ?, ?, ?, ?, NULL, 1, ?)'
+    ).run(chatId, req.user.id, msg.type, msg.body, msg.file_path, now());
+    const messageId = Number(r.lastInsertRowid);
+    for (const memberId of chatMembers(chatId)) {
+      if (memberId === req.user.id) continue;
+      const delivered = onlineUsers.has(memberId) ? 1 : 0;
+      db.prepare('INSERT INTO message_status (message_id, user_id, delivered, read) VALUES (?, ?, ?, 0)').run(messageId, memberId, delivered);
+    }
+    const copy = serializeMessage(db.prepare('SELECT * FROM messages WHERE id = ?').get(messageId), req.user.id);
+    broadcastToChat(chatId, { type: 'message', message: copy });
+    sent.push(copy);
+  }
+  res.json({ messages: sent });
+});
+
+app.get('/api/messages/:id/info', requireAuth, (req, res) => {
+  const id = Number(req.params.id);
+  const msg = db.prepare('SELECT * FROM messages WHERE id = ?').get(id);
+  if (!msg) return res.status(404).json({ error: 'Message not found.' });
+  if (msg.sender_id !== req.user.id) return res.status(403).json({ error: 'Only the sender can view message info.' });
+  const others = chatMembers(msg.chat_id).filter(x => x !== req.user.id);
+  const rows = db.prepare('SELECT user_id, delivered, read FROM message_status WHERE message_id = ?').all(id);
+  const info = others.map(uid => {
+    const row = db.prepare('SELECT * FROM users WHERE id = ?').get(uid);
+    const st = rows.find(r => r.user_id === uid) || { delivered: 0, read: 0 };
+    return { user: publicUser(row, req.user.id), delivered: !!st.delivered, read: !!st.read };
+  });
+  res.json({ info });
 });
 
 // Fallback route for the SPA (Express 5 needs a named wildcard).
@@ -563,10 +879,11 @@ wss.on('connection', (ws, req) => {
     if (data.type === 'read' && data.chat_id) {
       const chatId = Number(data.chat_id);
       if (!isMember(chatId, userId)) return;
+      const readVal = user.read_receipts !== 0 ? 1 : 0;
       db.prepare(
-        `UPDATE message_status SET delivered = 1, read = 1 WHERE user_id = ? AND message_id IN
+        `UPDATE message_status SET delivered = 1, read = ? WHERE user_id = ? AND message_id IN
          (SELECT id FROM messages WHERE chat_id = ? AND sender_id != ?)`
-      ).run(userId, chatId, userId);
+      ).run(readVal, userId, chatId, userId);
       broadcastToChat(chatId, { type: 'read', chat_id: chatId, user_id: userId }, userId);
     }
   });
