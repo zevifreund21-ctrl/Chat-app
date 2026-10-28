@@ -271,6 +271,18 @@ app.get('/api/users', requireAuth, (req, res) => {
   res.json({ users: rows.map(publicUser) });
 });
 
+// Everyone on the app, with a flag for people already in my contacts, so
+// contacts show up without having to search for them first.
+app.get('/api/directory', requireAuth, (req, res) => {
+  const rows = db.prepare(
+    `SELECT u.id, u.username, u.display_name, u.avatar, u.last_seen,
+       CASE WHEN c.contact_id IS NOT NULL THEN 1 ELSE 0 END AS is_contact
+     FROM users u LEFT JOIN contacts c ON c.contact_id = u.id AND c.user_id = ?
+     WHERE u.id != ? ORDER BY u.display_name COLLATE NOCASE`
+  ).all(req.user.id, req.user.id);
+  res.json({ users: rows.map(r => ({ ...publicUser(r), is_contact: !!r.is_contact })) });
+});
+
 app.get('/api/contacts', requireAuth, (req, res) => {
   const rows = db.prepare(
     `SELECT u.id, u.username, u.display_name, u.avatar, u.last_seen FROM contacts c
@@ -533,6 +545,16 @@ wss.on('connection', (ws, req) => {
   ws.on('message', raw => {
     let data;
     try { data = JSON.parse(raw.toString()); } catch { return; }
+    // Call signaling: forward WebRTC offer/answer/ICE/end between two users.
+    if (typeof data.type === 'string' && data.type.startsWith('call:')) {
+      const toId = Number(data.to);
+      if (!toId || toId === userId) return;
+      if (!db.prepare('SELECT id FROM users WHERE id = ?').get(toId)) return;
+      const sockets = onlineUsers.get(toId);
+      const payload = JSON.stringify({ ...data, from: userId, from_name: user.display_name });
+      if (sockets) for (const s of sockets) { if (s.readyState === 1) s.send(payload); }
+      return;
+    }
     if (data.type === 'typing' && data.chat_id) {
       const chatId = Number(data.chat_id);
       if (!isMember(chatId, userId)) return;

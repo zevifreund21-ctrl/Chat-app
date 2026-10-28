@@ -9,7 +9,8 @@ no third-party services, no API keys, no paid anything.
 
 - **Accounts** — sign up with a username, display name, and password.
   Passwords are hashed with scrypt and never sent to the browser.
-- **Contacts** — search for people by username or name, add them as contacts.
+- **Contacts** — a Contacts tab lists everyone on the app (your contacts first) with online status, so you can message or call anyone without searching; search for people by username or name, add them as contacts.
+- **Voice & video calls** — one-to-one WebRTC calls (voice or video) with mute and camera toggles, signaled in real time over the app's WebSocket connection.
 - **One-to-one and group chats** — create groups, add/remove members, leave a group.
 - **Messages** — text, photos, and voice notes (recorded in the browser).
   Reply to a message, edit your own text messages, delete for everyone.
